@@ -14,7 +14,6 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
-	"sync/atomic"
 	"time"
 
 	log "code.google.com/p/log4go"
@@ -24,7 +23,6 @@ import (
 	. "github.com/influxdb/influxdb/common"
 	"github.com/influxdb/influxdb/configuration"
 	"github.com/influxdb/influxdb/coordinator"
-	"github.com/influxdb/influxdb/migration"
 	"github.com/influxdb/influxdb/parser"
 	"github.com/influxdb/influxdb/protocol"
 )
@@ -159,9 +157,6 @@ func (self *HttpServer) Serve(listener net.Listener) {
 	self.registerEndpoint(p, "post", "/cluster/shard_spaces", self.createShardSpace)
 	self.registerEndpoint(p, "del", "/cluster/shard_spaces/:db/:name", self.dropShardSpace)
 	self.registerEndpoint(p, "post", "/cluster/database_configs/:db", self.configureDatabase)
-
-	// migrates leveldb data from 0.7 to 0.8 format.
-	self.registerEndpoint(p, "post", "/cluster/migrate_data", self.migrateData)
 
 	// return whether the cluster is in sync or not
 	self.registerEndpoint(p, "get", "/sync", self.isInSync)
@@ -1165,22 +1160,5 @@ func (self *HttpServer) configureDatabase(w libhttp.ResponseWriter, r *libhttp.R
 			}
 		}
 		return libhttp.StatusCreated, nil
-	})
-}
-
-func (self *HttpServer) migrateData(w libhttp.ResponseWriter, r *libhttp.Request) {
-	self.tryAsClusterAdmin(w, r, func(u User) (int, interface{}) {
-		if !atomic.CompareAndSwapUint32(&self.migrationRunning, MIGRATION_NOT_RUNNING, MIGRATION_RUNNING) {
-			return libhttp.StatusForbidden, fmt.Errorf("A migration is already running")
-		}
-		go func() {
-			log.Info("Starting Migration")
-			defer atomic.CompareAndSwapUint32(&self.migrationRunning, MIGRATION_RUNNING, MIGRATION_NOT_RUNNING)
-			dataMigrator := migration.NewDataMigrator(
-				self.coordinator, self.clusterConfig, self.config, self.config.DataDir, "shard_db", self.clusterConfig.MetaStore)
-			dataMigrator.Migrate()
-		}()
-
-		return libhttp.StatusAccepted, nil
 	})
 }
