@@ -92,12 +92,27 @@ func (self *ProtobufClient) ClearRequests() {
 	self.requestBufferLock.Lock()
 	defer self.requestBufferLock.Unlock()
 
-	message := "clearing all requests"
 	for _, req := range self.requestBuffer {
-		req.r.Yield(&protocol.Response{Type: &endStreamResponse, ErrorMessage: &message})
+		self.cancelRequest(req.request)
 	}
 
 	self.requestBuffer = map[uint32]*runningRequest{}
+}
+
+func (self *ProtobufClient) CancelRequest(request *protocol.Request) {
+	self.requestBufferLock.Lock()
+	defer self.requestBufferLock.Unlock()
+	self.cancelRequest(request)
+}
+
+func (self *ProtobufClient) cancelRequest(request *protocol.Request) {
+	req, ok := self.requestBuffer[*request.Id]
+	if !ok {
+		return
+	}
+	message := "cancelling request"
+	req.r.Yield(&protocol.Response{Type: &endStreamResponse, ErrorMessage: &message})
+	delete(self.requestBuffer, *request.Id)
 }
 
 // Makes a request to the server. If the responseStream chan is not nil it will expect a response from the server
@@ -194,14 +209,29 @@ func (self *ProtobufClient) sendResponse(response *protocol.Response) {
 	self.requestBufferLock.RLock()
 	req, ok := self.requestBuffer[*response.RequestId]
 	self.requestBufferLock.RUnlock()
-	if ok {
-		if *response.Type == protocol.Response_END_STREAM || *response.Type == protocol.Response_WRITE_OK || *response.Type == protocol.Response_HEARTBEAT || *response.Type == protocol.Response_ACCESS_DENIED {
-			self.requestBufferLock.Lock()
-			delete(self.requestBuffer, *response.RequestId)
-			self.requestBufferLock.Unlock()
-		}
-		req.r.Yield(response)
+	if !ok {
+		return
 	}
+
+	switch response.GetType() {
+	case protocol.Response_END_STREAM,
+		protocol.Response_WRITE_OK,
+		protocol.Response_HEARTBEAT,
+		protocol.Response_ACCESS_DENIED:
+		// continue and delete the request
+	default:
+		return
+	}
+
+	self.requestBufferLock.Lock()
+	req, ok = self.requestBuffer[*response.RequestId]
+	delete(self.requestBuffer, *response.RequestId)
+	self.requestBufferLock.Unlock()
+	if !ok {
+		return
+	}
+
+	req.r.Yield(response)
 }
 
 func (self *ProtobufClient) reconnect() net.Conn {

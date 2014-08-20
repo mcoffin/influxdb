@@ -1,6 +1,10 @@
 package coordinator
 
 import (
+	"fmt"
+
+	"code.google.com/p/log4go"
+
 	"github.com/influxdb/influxdb/common"
 	"github.com/influxdb/influxdb/engine"
 	"github.com/influxdb/influxdb/protocol"
@@ -24,9 +28,15 @@ func NewMergeChannelProcessor(next engine.Processor, concurrency int) *MergeChan
 	return p
 }
 
-func (p *MergeChannelProcessor) Close() {
+func (p *MergeChannelProcessor) Close() (err error) {
 	close(p.c)
-	close(p.e)
+
+	for e := range p.e {
+		if e != nil {
+			err = e
+		}
+	}
+
 	for c := range p.c {
 	nextChannel:
 		for r := range c {
@@ -39,6 +49,7 @@ func (p *MergeChannelProcessor) Close() {
 			}
 		}
 	}
+	return err
 }
 
 func (p *MergeChannelProcessor) NextChannel(bs int) (chan<- *protocol.Response, error) {
@@ -51,23 +62,42 @@ func (p *MergeChannelProcessor) NextChannel(bs int) (chan<- *protocol.Response, 
 	return c, nil
 }
 
+func (p *MergeChannelProcessor) String() string {
+	return fmt.Sprintf("MergeChannelProcessor (%d)", cap(p.e))
+}
+
 func (p *MergeChannelProcessor) ProcessChannels() {
+	defer close(p.e)
+
 	for channel := range p.c {
+	nextChannel:
 		for response := range channel {
+			log4go.Debug("%s received %s", p, response)
+
 			switch response.GetType() {
 
+			// all these four types end the stream
 			case protocol.Response_WRITE_OK,
 				protocol.Response_HEARTBEAT,
 				protocol.Response_ACCESS_DENIED,
 				protocol.Response_END_STREAM:
 
-				// all these four types end the stream
+				var err error
 				if m := response.ErrorMessage; m != nil {
-					p.e <- common.NewQueryError(common.InvalidArgument, *m)
+					err = common.NewQueryError(common.InvalidArgument, *m)
 				}
-				return
+				p.e <- err
+				break nextChannel
+
 			case protocol.Response_QUERY:
-				p.next.Yield(response.Series)
+				for _, s := range response.MultiSeries {
+					log4go.Debug("Yielding to %s: %s", p.next.Name(), s)
+					_, err := p.next.Yield(s)
+					if err != nil {
+						p.e <- err
+						return
+					}
+				}
 			}
 		}
 	}

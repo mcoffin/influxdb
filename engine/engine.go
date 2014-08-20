@@ -25,18 +25,18 @@ func NewQueryEngine(next Processor, query *parser.SelectQuery) (Processor, error
 
 	var engine Processor = NewPassthroughEngineWithLimit(next, 1, limit)
 
-	fromClause := query.GetFromClause()
-	if fromClause.Type == parser.FromClauseMerge {
-		engine = NewMergeEngine(fromClause.Names[0].Name.Name, fromClause.Names[1].Name.Name, query.Ascending, engine)
-	} else if fromClause.Type == parser.FromClauseInnerJoin {
-		engine = NewJoinEngine(query, engine)
-	}
-
 	var err error
 	if query.HasAggregates() {
 		engine, err = NewAggregatorEngine(query, engine)
 	} else if containsArithmeticOperators(query) {
 		engine, err = NewArithmeticEngine(query, engine)
+	}
+
+	fromClause := query.GetFromClause()
+	if fromClause.Type == parser.FromClauseMerge {
+		engine = NewMergeEngine(fromClause.Names[0].Name.Name, fromClause.Names[1].Name.Name, query.Ascending, engine)
+	} else if fromClause.Type == parser.FromClauseInnerJoin {
+		engine = NewJoinEngine(query, engine)
 	}
 
 	if err != nil {

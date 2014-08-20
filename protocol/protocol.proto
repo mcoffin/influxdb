@@ -66,10 +66,9 @@ message Response {
   }
   required Type type = 1;
   required uint32 request_id = 2;
-  optional Series series = 3;
+  repeated Series multi_series = 3;
   optional ErrorCode error_code = 4;
   optional string error_message = 5;
   optional int64 nextPointTime = 6;
   optional Request request = 7;
-  repeated Series multi_series = 8;
 }

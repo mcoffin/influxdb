@@ -130,9 +130,13 @@ func (self *CommonMergeEngine) yieldNextPoints() (bool, error) {
 // older than what's in `self` so we can safely flush all `self`
 // points.
 func (self *CommonMergeEngine) flushIfNecessary() (bool, error) {
-	for _, s := range []*seriesMergeState{self.left, self.right} {
-		ok, err := s.flush(self)
-		if !ok || err != nil {
+	if self.left.done && len(self.left.series) == 0 {
+		if ok, err := self.right.flush(self); err != nil || !ok {
+			return ok, err
+		}
+	}
+	if self.right.done && len(self.right.series) == 0 {
+		if ok, err := self.left.flush(self); err != nil || !ok {
 			return ok, err
 		}
 	}
@@ -201,11 +205,13 @@ func NewCommonMergeEngine(table1, table2 string, mergeColumns bool, ascending bo
 }
 
 func (e *CommonMergeEngine) Close() error {
+	e.Yield(&protocol.Series{Name: &e.left.name, Fields: []string{}})
+	e.Yield(&protocol.Series{Name: &e.right.name, Fields: []string{}})
 	return e.next.Close()
 }
 
 func (e *CommonMergeEngine) Name() string {
-	return "Common Merge Engine"
+	return "CommonMergeEngine"
 }
 
 func (e *CommonMergeEngine) Yield(s *protocol.Series) (bool, error) {

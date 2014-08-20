@@ -419,21 +419,13 @@ func (self *ShardData) LogAndHandleDestructiveQuery(querySpec *parser.QuerySpec,
 	self.HandleDestructiveQuery(querySpec, request, response, runLocalOnly)
 }
 
-func (self *ShardData) deleteDataLocally(querySpec *parser.QuerySpec) (<-chan *p.Response, error) {
-	localResponses := make(chan *p.Response, 1)
-
-	// this doesn't really apply at this point since destructive queries don't output anything, but it may later
-	maxPointsFromDestructiveQuery := 1000
-	rc := NewResponseChannelProcessor(NewResponseChannelWrapper(localResponses))
-	processor := engine.NewPassthroughEngine(rc, maxPointsFromDestructiveQuery)
+func (self *ShardData) deleteDataLocally(querySpec *parser.QuerySpec) error {
 	shard, err := self.store.GetOrCreateShard(self.id)
 	if err != nil {
-		return nil, err
+		return err
 	}
 	defer self.store.ReturnShard(self.id)
-	err = shard.Query(querySpec, processor)
-	processor.Close()
-	return localResponses, err
+	return shard.Query(querySpec, NilProcessor{})
 }
 
 func (self *ShardData) forwardRequest(request *p.Request) ([]<-chan *p.Response, []uint32, error) {
@@ -460,15 +452,13 @@ func (self *ShardData) HandleDestructiveQuery(querySpec *parser.QuerySpec, reque
 	serverIds := []uint32{}
 
 	if self.IsLocal {
-		channel, err := self.deleteDataLocally(querySpec)
+		err := self.deleteDataLocally(querySpec)
 		if err != nil {
 			msg := err.Error()
 			response <- &p.Response{Type: &endStreamResponse, ErrorMessage: &msg}
 			log.Error(msg)
 			return
 		}
-		responseChannels = append(responseChannels, channel)
-		serverIds = append(serverIds, self.localServerId)
 	}
 
 	log.Debug("request %s, runLocalOnly: %v", request.GetDescription(), runLocalOnly)

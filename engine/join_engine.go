@@ -33,7 +33,7 @@ func NewJoinEngine(query *parser.SelectQuery, next Processor) Processor {
 func (_ *JoinEngine) SetShardInfo(shardId int, shardLocal bool) {}
 
 func (je *JoinEngine) Name() string {
-	return "Join Engine"
+	return "JoinEngine"
 }
 
 func (je *JoinEngine) Close() error {

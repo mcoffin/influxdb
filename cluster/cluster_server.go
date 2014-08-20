@@ -36,6 +36,7 @@ type ServerConnection interface {
 	Close()
 	ClearRequests()
 	MakeRequest(*protocol.Request, ResponseChannel) error
+	CancelRequest(*protocol.Request)
 }
 
 type ServerState int
@@ -96,11 +97,7 @@ func (self *ClusterServer) MakeRequest(request *protocol.Request, responseStream
 	rc := NewResponseChannelWrapper(responseStream)
 	err := self.connection.MakeRequest(request, rc)
 	if err != nil {
-		message := err.Error()
-		select {
-		case responseStream <- &protocol.Response{Type: &endStreamResponse, ErrorMessage: &message}:
-		default:
-		}
+		self.connection.CancelRequest(request)
 		self.markServerAsDown()
 	}
 }

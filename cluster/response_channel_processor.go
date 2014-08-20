@@ -6,8 +6,10 @@ type ResponseChannelProcessor struct {
 	r ResponseChannel
 }
 
-var QueryResponse = protocol.Response_QUERY
-var EndStreamResponse = protocol.Response_END_STREAM
+var (
+	QueryResponse     = protocol.Response_QUERY
+	EndStreamResponse = protocol.Response_END_STREAM
+)
 
 func NewResponseChannelProcessor(r ResponseChannel) *ResponseChannelProcessor {
 	return &ResponseChannelProcessor{r}
@@ -22,6 +24,9 @@ func (p *ResponseChannelProcessor) Yield(s *protocol.Series) (bool, error) {
 }
 
 func (p *ResponseChannelProcessor) Close() error {
+	p.r.Yield(&protocol.Response{
+		Type: &EndStreamResponse,
+	})
 	return nil
 }
 

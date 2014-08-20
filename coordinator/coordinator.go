@@ -276,11 +276,21 @@ func (self *Coordinator) runQuerySpec(querySpec *parser.QuerySpec, p engine.Proc
 	log.Debug("Shard concurrent limit: %d", shardConcurrentLimit)
 
 	mcp := NewMergeChannelProcessor(processor, shardConcurrentLimit)
-	defer mcp.Close()
 
 	go mcp.ProcessChannels()
 
-	return self.queryShards(querySpec, shards, mcp)
+	if err := self.queryShards(querySpec, shards, mcp); err != nil {
+		log.Error("Error while querying shards: %s", err)
+		mcp.Close()
+		return err
+	}
+
+	if err := mcp.Close(); err != nil {
+		log.Error("Error while querying shards: %s", err)
+		return err
+	}
+
+	return processor.Close()
 }
 
 func (self *Coordinator) ForceCompaction(user common.User) error {
