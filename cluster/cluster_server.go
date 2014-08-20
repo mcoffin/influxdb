@@ -35,7 +35,7 @@ type ServerConnection interface {
 	Connect()
 	Close()
 	ClearRequests()
-	MakeRequest(request *protocol.Request, responseStream chan *protocol.Response) error
+	MakeRequest(*protocol.Request, ResponseChannel) error
 }
 
 type ServerState int
@@ -92,8 +92,9 @@ func (self *ClusterServer) Connect() {
 	self.connection.Connect()
 }
 
-func (self *ClusterServer) MakeRequest(request *protocol.Request, responseStream chan *protocol.Response) {
-	err := self.connection.MakeRequest(request, responseStream)
+func (self *ClusterServer) MakeRequest(request *protocol.Request, responseStream chan<- *protocol.Response) {
+	rc := NewResponseChannelWrapper(responseStream)
+	err := self.connection.MakeRequest(request, rc)
 	if err != nil {
 		message := err.Error()
 		select {
@@ -106,7 +107,8 @@ func (self *ClusterServer) MakeRequest(request *protocol.Request, responseStream
 
 func (self *ClusterServer) Write(request *protocol.Request) error {
 	responseChan := make(chan *protocol.Response, 1)
-	err := self.connection.MakeRequest(request, responseChan)
+	rc := NewResponseChannelWrapper(responseChan)
+	err := self.connection.MakeRequest(request, rc)
 	if err != nil {
 		return err
 	}

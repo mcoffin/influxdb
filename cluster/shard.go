@@ -25,24 +25,9 @@ type Shard interface {
 	EndTime() time.Time
 	Write(*p.Request) error
 	SyncWrite(req *p.Request, assignSeqNum bool) error
-	Query(querySpec *parser.QuerySpec, response chan *p.Response)
+	Query(querySpec *parser.QuerySpec, response chan<- *p.Response)
 	ReplicationFactor() int
 	IsMicrosecondInRange(t int64) bool
-}
-
-// Passed to a shard (local datastore or whatever) that gets yielded points from series.
-type QueryProcessor interface {
-	// This method returns true if the query should continue. If the query should be stopped,
-	// like maybe the limit was hit, it should return false
-	YieldPoint(seriesName *string, columnNames []string, point *p.Point) bool
-	YieldSeries(seriesIncoming *p.Series) bool
-	Close()
-
-	// Set by the shard, so EXPLAIN query can know query against which shard is being measured
-	SetShardInfo(shardId int, shardLocal bool)
-
-	// Let QueryProcessor identify itself. What if it is a spy and we can't check that?
-	GetName() string
 }
 
 type NewShardData struct {
@@ -112,7 +97,7 @@ var (
 
 type LocalShardDb interface {
 	Write(database string, series []*p.Series) error
-	Query(*parser.QuerySpec, QueryProcessor) error
+	Query(*parser.QuerySpec, engine.Processor) error
 	DropFields(fields []*metastore.Field) error
 	IsClosed() bool
 }
@@ -241,7 +226,7 @@ func (self *ShardData) WriteLocalOnly(request *p.Request) error {
 	return nil
 }
 
-func (self *ShardData) Query(querySpec *parser.QuerySpec, response chan *p.Response) {
+func (self *ShardData) Query(querySpec *parser.QuerySpec, response chan<- *p.Response) {
 	log.Debug("QUERY: shard %d, query '%s'", self.Id(), querySpec.GetQueryString())
 	defer common.RecoverFunc(querySpec.Database(), querySpec.GetQueryString(), func(err interface{}) {
 		response <- &p.Response{Type: &endStreamResponse, ErrorMessage: p.String(fmt.Sprintf("%s", err))}
@@ -258,33 +243,30 @@ func (self *ShardData) Query(querySpec *parser.QuerySpec, response chan *p.Respo
 	}
 
 	if self.IsLocal {
-		var processor QueryProcessor
+		var processor engine.Processor = NewResponseChannelProcessor(NewResponseChannelWrapper(response))
 		var err error
 
-		if querySpec.IsListSeriesQuery() {
-			processor = engine.NewListSeriesEngine(response)
-		} else if querySpec.IsDeleteFromSeriesQuery() || querySpec.IsDropSeriesQuery() || querySpec.IsSinglePointQuery() {
+		if querySpec.IsDeleteFromSeriesQuery() || querySpec.IsDropSeriesQuery() || querySpec.IsSinglePointQuery() {
 			maxDeleteResults := 10000
-			processor = engine.NewPassthroughEngine(response, maxDeleteResults)
+			processor = engine.NewPassthroughEngine(processor, maxDeleteResults)
 		} else {
 			query := querySpec.SelectQuery()
 			if self.ShouldAggregateLocally(querySpec) {
 				log.Debug("creating a query engine")
-				processor, err = engine.NewQueryEngine(query, response)
+				processor, err = engine.NewQueryEngine(processor, query)
 				if err != nil {
 					response <- &p.Response{Type: &endStreamResponse, ErrorMessage: p.String(err.Error())}
 					log.Error("Error while creating engine: %s", err)
 					return
 				}
-				processor.SetShardInfo(int(self.Id()), self.IsLocal)
 			} else if query.HasAggregates() {
 				maxPointsToBufferBeforeSending := 1000
 				log.Debug("creating a passthrough engine")
-				processor = engine.NewPassthroughEngine(response, maxPointsToBufferBeforeSending)
+				processor = engine.NewPassthroughEngine(processor, maxPointsToBufferBeforeSending)
 			} else {
 				maxPointsToBufferBeforeSending := 1000
 				log.Debug("creating a passthrough engine with limit")
-				processor = engine.NewPassthroughEngineWithLimit(response, maxPointsToBufferBeforeSending, query.Limit)
+				processor = engine.NewPassthroughEngineWithLimit(processor, maxPointsToBufferBeforeSending, query.Limit)
 			}
 
 			if query.GetFromClause().Type != parser.FromClauseInnerJoin {
@@ -422,18 +404,18 @@ func (self *ShardData) QueryResponseBufferSize(querySpec *parser.QuerySpec, batc
 	return tickCount
 }
 
-func (self *ShardData) logAndHandleDeleteQuery(querySpec *parser.QuerySpec, response chan *p.Response) {
+func (self *ShardData) logAndHandleDeleteQuery(querySpec *parser.QuerySpec, response chan<- *p.Response) {
 	queryString := querySpec.GetQueryStringWithTimeCondition()
 	request := self.createRequest(querySpec)
 	request.Query = &queryString
 	self.LogAndHandleDestructiveQuery(querySpec, request, response, false)
 }
 
-func (self *ShardData) logAndHandleDropSeriesQuery(querySpec *parser.QuerySpec, response chan *p.Response) {
+func (self *ShardData) logAndHandleDropSeriesQuery(querySpec *parser.QuerySpec, response chan<- *p.Response) {
 	self.LogAndHandleDestructiveQuery(querySpec, self.createRequest(querySpec), response, false)
 }
 
-func (self *ShardData) LogAndHandleDestructiveQuery(querySpec *parser.QuerySpec, request *p.Request, response chan *p.Response, runLocalOnly bool) {
+func (self *ShardData) LogAndHandleDestructiveQuery(querySpec *parser.QuerySpec, request *p.Request, response chan<- *p.Response, runLocalOnly bool) {
 	self.HandleDestructiveQuery(querySpec, request, response, runLocalOnly)
 }
 
@@ -442,7 +424,8 @@ func (self *ShardData) deleteDataLocally(querySpec *parser.QuerySpec) (<-chan *p
 
 	// this doesn't really apply at this point since destructive queries don't output anything, but it may later
 	maxPointsFromDestructiveQuery := 1000
-	processor := engine.NewPassthroughEngine(localResponses, maxPointsFromDestructiveQuery)
+	rc := NewResponseChannelProcessor(NewResponseChannelWrapper(localResponses))
+	processor := engine.NewPassthroughEngine(rc, maxPointsFromDestructiveQuery)
 	shard, err := self.store.GetOrCreateShard(self.id)
 	if err != nil {
 		return nil, err
@@ -468,7 +451,7 @@ func (self *ShardData) forwardRequest(request *p.Request) ([]<-chan *p.Response,
 	return responses, ids, nil
 }
 
-func (self *ShardData) HandleDestructiveQuery(querySpec *parser.QuerySpec, request *p.Request, response chan *p.Response, runLocalOnly bool) {
+func (self *ShardData) HandleDestructiveQuery(querySpec *parser.QuerySpec, request *p.Request, response chan<- *p.Response, runLocalOnly bool) {
 	if !self.IsLocal && runLocalOnly {
 		panic("WTF islocal is false and runLocalOnly is true")
 	}
