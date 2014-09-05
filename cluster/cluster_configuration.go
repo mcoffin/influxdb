@@ -637,15 +637,9 @@ func (self *ClusterConfiguration) Save() ([]byte, error) {
 }
 
 func (self *ClusterConfiguration) convertShardsToNewShardData(shards []*ShardData) []*NewShardData {
-	newShardData := make([]*NewShardData, len(shards), len(shards))
-	for i, shard := range shards {
-		newShardData[i] = &NewShardData{
-			Id:        shard.id,
-			Database:  shard.Database,
-			SpaceName: shard.SpaceName,
-			StartTime: shard.startTime,
-			EndTime:   shard.endTime,
-			ServerIds: shard.serverIds}
+	newShardData := make([]*NewShardData, 0, len(shards))
+	for _, shard := range shards {
+		newShardData = append(newShardData, shard.ToNewShardData())
 	}
 	return newShardData
 }
