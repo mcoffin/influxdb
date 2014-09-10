@@ -66,30 +66,26 @@ func (self *DataTestSuite) TestAll(c *C) {
 
 	c.Logf("Running %d data tests", len(names))
 
-	for idx := range setup {
-		c.Logf("Initializing database for %s", names[idx])
-		client.CreateDatabase(fmt.Sprintf("db%d", idx), c)
-	}
-
-	self.server.WaitForServerToSync()
-
-	for idx, s := range setup {
-		client.SetDB(fmt.Sprintf("db%d", idx))
-		c.Logf("Writing data for %s", names[idx])
-		s(client)
-	}
-
-	self.server.WaitForServerToSync()
-
 	// make sure the tests don't use an idle connection, otherwise the
 	// server will close it
 	http.DefaultTransport.(*http.Transport).CloseIdleConnections()
 
-	for idx, t := range test {
-		client.SetDB(fmt.Sprintf("db%d", idx))
+	for idx, testFn := range test {
+		c.Logf("Creating database for %s", names[idx])
+		dbname := fmt.Sprintf("db%d", idx)
+		client.CreateDatabase(dbname, c)
+		client.SetDB(dbname)
+
+		c.Logf("Running setup for %s", names[idx])
+		setupFn := setup[idx]
+		setupFn(client)
+
 		c.Logf("Started %s", names[idx])
-		t(client)
+		testFn(client)
 		c.Logf("Finished %s", names[idx])
+
+		c.Logf("Deleting database for %s", names[idx])
+		client.DeleteDatabase(dbname, c)
 	}
 }
 
@@ -565,6 +561,27 @@ func (self *DataTestSuite) JoinWithInvalidFilteringShouldReturnMeaningfulError(c
 		}
 }
 
+// issue #768
+func (self *DataTestSuite) MinusOperatorWithoutSpace(c *C) (Fun, Fun) {
+	return func(client Client) {
+			data := `
+  [{
+    "points": [
+        [2, 3]
+    ],
+    "name": "test_minus_operator",
+    "columns": ["val1", "val2"]
+  }]`
+			client.WriteJsonData(data, c)
+		}, func(client Client) {
+			serieses := client.RunQuery("select val2-val1 from test_minus_operator ", c, "m")
+			c.Assert(serieses, HasLen, 1)
+			maps := ToMap(serieses[0])
+			c.Assert(maps, HasLen, 1)
+			c.Assert(maps[0]["expr0"], Equals, 1.0)
+		}
+}
+
 // issue #540
 func (self *DataTestSuite) RegexMatching(c *C) (Fun, Fun) {
 	return func(client Client) {
@@ -768,6 +785,20 @@ func (self *DataTestSuite) DistinctWithLimit(c *C) (Fun, Fun) {
 			c.Assert(series, HasLen, 1)
 			c.Assert(series[0].Columns, HasLen, 2) // 6 columns plus the time column
 			c.Assert(series[0].Points, HasLen, 10)
+		}
+}
+
+func (self *DataTestSuite) InsensitiveRegexMatching(c *C) (Fun, Fun) {
+	return func(client Client) {
+			data := `[{"name":"foo","columns":["value"],"points":[["Paul"]]}]`
+			client.WriteJsonData(data, c)
+		}, func(client Client) {
+			series := client.RunQuery("select * from foo where value =~ /paul/i", c, "m")
+			c.Assert(series, HasLen, 1)
+			c.Assert(series[0].Name, Equals, "foo")
+			maps := ToMap(series[0])
+			c.Assert(maps, HasLen, 1)
+			c.Assert(maps[0]["value"], Equals, "Paul")
 		}
 }
 
@@ -1413,15 +1444,19 @@ func (self *DataTestSuite) SinglePointSelect(c *C) (Fun, Fun) {
 
 			query := "select * from test_single_points;"
 			data := client.RunQuery(query, c, "u")
-			c.Assert(data[0].Points, HasLen, 2)
+			c.Assert(data, HasLen, 1)
+			expected := ToMap(data[0])
+			c.Assert(expected, HasLen, 2)
 
-			for _, point := range data[0].Points {
-				query := fmt.Sprintf("select * from test_single_points where time = %.0fu and sequence_number = %0.f;", point[0].(float64), point[1])
+			for _, point := range expected {
+				query := fmt.Sprintf("select * from test_single_points where time = %.0fu and sequence_number = %0.f;", point["time"], point["sequence_number"])
 				data := client.RunQuery(query, c, "u")
 				c.Assert(data, HasLen, 1)
-				c.Assert(data[0].Points, HasLen, 1)
-				c.Assert(data[0].Points[0], HasLen, 3)
-				c.Assert(data[0].Points[0][2], Equals, point[2])
+				maps := ToMap(data[0])
+				c.Assert(maps, HasLen, 1)
+				actual := maps[0]
+				c.Assert(actual, HasLen, 3)
+				c.Assert(actual["time"], Equals, point["time"])
 			}
 		}
 }
@@ -1444,7 +1479,7 @@ func (self *DataTestSuite) SinglePointSelectWithNullValues(c *C) (Fun, Fun) {
 			maps := ToMap(data[0])
 
 			for _, m := range maps {
-				query := fmt.Sprintf("select * from test_single_points_with_nulls where time = %.0fu and sequence_number = %0.f;", m["time"].(float64), m["sequence_number"].(float64))
+				query := fmt.Sprintf("select * from test_single_points_with_nulls where time = %.0fu and sequence_number = %0.f;", m["time"], m["sequence_number"])
 				data := client.RunQuery(query, c, "u")
 				c.Assert(data, HasLen, 1)
 				actualMaps := ToMap(data[0])
@@ -1523,7 +1558,7 @@ func (self *DataTestSuite) SeriesListing(c *C) (Fun, Fun) {
 func (self *DataTestSuite) ArithmeticOperations(c *C) (Fun, Fun) {
 	queries := map[string][9]float64{
 		"select input + output from test_arithmetic_3.0;":       {1, 2, 3, 4, 5, 9, 6, 7, 13},
-		"select input - output from test_arithmetic_-1.0;":      {1, 2, -1, 4, 5, -1, 6, 7, -1},
+		"select input - output from \"test_arithmetic_-1.0\";":  {1, 2, -1, 4, 5, -1, 6, 7, -1},
 		"select input * output from test_arithmetic_2.0;":       {1, 2, 2, 4, 5, 20, 6, 7, 42},
 		"select 1.0 * input / output from test_arithmetic_0.5;": {1, 2, 0.5, 4, 5, 0.8, 6, 8, 0.75},
 	}
@@ -1597,6 +1632,16 @@ func (self *DataTestSuite) CountQueryOnSingleShard(c *C) (Fun, Fun) {
 			c.Assert(maps, HasLen, 2)
 			c.Assert(maps[0]["count"], Equals, 3.0)
 			c.Assert(maps[1]["count"], Equals, 1.0)
+		}
+}
+
+// issue #714
+func (self *DataTestSuite) WhereClauseWithFunction(c *C) (Fun, Fun) {
+	return func(client Client) {
+			serieses := CreatePoints("test_where_clause_with_function", 1, 1)
+			client.WriteData(serieses, c)
+		}, func(client Client) {
+			client.RunInvalidQuery("select column0 from test_where_clause_with_function where empty(column0)", c)
 		}
 }
 
@@ -2273,5 +2318,98 @@ func (self *DataTestSuite) MeanAggregateFillWithZero(c *C) (Fun, Fun) {
 				c.Assert(maps[2], DeepEquals, map[string]interface{}{"time": 1304378380000.0, "mean": 20.0})
 				c.Assert(maps[3], DeepEquals, map[string]interface{}{"time": 1304378370000.0, "mean": 10.0})
 			}
+		}
+}
+
+// issue #669
+func HistogramHelper(c *C, client Client, query string, expected map[float64]float64) {
+	//Test basic histogram
+	collection := client.RunQuery(query, c)
+
+	c.Assert(collection, HasLen, 1)
+	maps := ToMap(collection[0])
+	actual := make(map[float64]float64, len(maps))
+	for key := range maps {
+		c.Logf(fmt.Sprintf(`%d: bucket_start: %f count: %f`, key, maps[key]["bucket_start"], maps[key]["count"]))
+		actual[maps[key]["bucket_start"].(float64)] = maps[key]["count"].(float64)
+	}
+	c.Assert(actual, HasLen, len(expected))
+	for bucket, count := range expected {
+		c.Assert(actual[bucket], Equals, count)
+	}
+}
+
+func (self *DataTestSuite) Histogram(c *C) (Fun, Fun) {
+	return func(client Client) {
+			c.Logf("Running Histogram test")
+			data := `[{"points": [[-3], [-2], [-1], [0], [1], [2], [3]], "name": "test_histogram", "columns": ["value"]}]`
+			client.WriteJsonData(data, c)
+		}, func(client Client) {
+			//Test basic histogram
+			expected := make(map[float64]float64, 7)
+			expected[-3.0] = 1.0
+			expected[-2.0] = 1.0
+			expected[-1.0] = 1.0
+			expected[0.0] = 1.0
+			expected[1.0] = 1.0
+			expected[2.0] = 1.0
+			expected[3.0] = 1.0
+			HistogramHelper(c, client, "select Histogram(value, 1.0) from test_histogram", expected)
+
+			// Test specifying start and stop
+			HistogramHelper(c, client, "select Histogram(value, 1.0, -3, 3) from test_histogram", expected)
+
+			// Test specifying start and stop outside domain of data
+			expected = make(map[float64]float64, 21)
+			expected[-10.0] = 0.0
+			expected[-9.0] = 0.0
+			expected[-8.0] = 0.0
+			expected[-7.0] = 0.0
+			expected[-6.0] = 0.0
+			expected[-5.0] = 0.0
+			expected[-4.0] = 0.0
+			expected[-3.0] = 1.0
+			expected[-2.0] = 1.0
+			expected[-1.0] = 1.0
+			expected[0.0] = 1.0
+			expected[1.0] = 1.0
+			expected[2.0] = 1.0
+			expected[3.0] = 1.0
+			expected[4.0] = 0.0
+			expected[5.0] = 0.0
+			expected[6.0] = 0.0
+			expected[7.0] = 0.0
+			expected[8.0] = 0.0
+			expected[9.0] = 0.0
+			expected[10.0] = 0.0
+			HistogramHelper(c, client, "select Histogram(value, 1.0, -10, 10) from test_histogram", expected)
+
+			// Test specifying start and stop inside domain of data
+			expected = make(map[float64]float64, 2)
+			expected[-1.0] = 1.0
+			expected[0.0] = 1.0
+			HistogramHelper(c, client, "select Histogram(value, 1.0, -1, 0) from test_histogram", expected)
+
+			// Test specifying step and start that don't align with 0
+			expected = make(map[float64]float64, 4)
+			expected[-3.0] = 2.0
+			expected[-1.0] = 2.0
+			expected[1.0] = 2.0
+			expected[3.0] = 1.0
+			HistogramHelper(c, client, "select Histogram(value, 2.0, -3) from test_histogram", expected)
+			HistogramHelper(c, client, "select Histogram(value, 2.0, -3, 3) from test_histogram", expected)
+
+			// Test specifying step, start and stop that don't align with 0 inside the domain
+			expected = make(map[float64]float64, 3)
+			expected[-3.0] = 2.0
+			expected[-1.0] = 2.0
+			expected[1.0] = 2.0
+			HistogramHelper(c, client, "select Histogram(value, 2.0, -3, 1) from test_histogram", expected)
+
+			// Test specifying step and start that don't align with stop
+			expected = make(map[float64]float64, 2)
+			expected[-1.0] = 2.0
+			expected[1.0] = 2.0
+			HistogramHelper(c, client, "select Histogram(value, 2.0, -1, 2) from test_histogram", expected)
 		}
 }

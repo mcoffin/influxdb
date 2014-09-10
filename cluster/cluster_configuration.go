@@ -125,16 +125,16 @@ func NewClusterConfiguration(
 	}
 }
 
-func (self *ClusterConfiguration) DoesShardSpaceExist(space *ShardSpace) error {
+func (self *ClusterConfiguration) ShardSpaceExists(space *ShardSpace) bool {
 	self.shardLock.RLock()
 	defer self.shardLock.RUnlock()
 	dbSpaces := self.databaseShardSpaces[space.Database]
 	for _, s := range dbSpaces {
 		if s.Name == space.Name {
-			return fmt.Errorf("Shard space %s exists", space.Name)
+			return true
 		}
 	}
-	return nil
+	return false
 }
 
 func (self *ClusterConfiguration) SetShardCreator(shardCreator ShardCreator) {
@@ -611,6 +611,17 @@ type SavedConfiguration struct {
 
 func (self *ClusterConfiguration) Save() ([]byte, error) {
 	log.Debug("Dumping the cluster configuration")
+	data := self.SerializableConfiguration()
+	b := bytes.NewBuffer(nil)
+	err := gob.NewEncoder(b).Encode(&data)
+	if err != nil {
+		return nil, err
+	}
+
+	return b.Bytes(), nil
+}
+
+func (self *ClusterConfiguration) SerializableConfiguration() *SavedConfiguration {
 	data := &SavedConfiguration{
 		Databases:           make(map[string]uint8, len(self.DatabaseReplicationFactors)),
 		Admins:              self.clusterAdmins,
@@ -626,14 +637,7 @@ func (self *ClusterConfiguration) Save() ([]byte, error) {
 	for k := range self.DatabaseReplicationFactors {
 		data.Databases[k] = 0
 	}
-
-	b := bytes.NewBuffer(nil)
-	err := gob.NewEncoder(b).Encode(&data)
-	if err != nil {
-		return nil, err
-	}
-
-	return b.Bytes(), nil
+	return data
 }
 
 func (self *ClusterConfiguration) convertShardsToNewShardData(shards []*ShardData) []*NewShardData {
@@ -781,18 +785,6 @@ func (self *ClusterConfiguration) LastContinuousQueryRunTime() time.Time {
 
 func (self *ClusterConfiguration) SetLastContinuousQueryRunTime(t time.Time) {
 	self.continuousQueryTimestamp = t
-}
-
-func (self *ClusterConfiguration) GetMapForJsonSerialization() map[string]interface{} {
-	jsonObject := make(map[string]interface{})
-	dbs := make([]string, 0)
-	for db := range self.DatabaseReplicationFactors {
-		dbs = append(dbs, db)
-	}
-	jsonObject["databases"] = dbs
-	jsonObject["cluster_admins"] = self.clusterAdmins
-	jsonObject["database_users"] = self.dbUsers
-	return jsonObject
 }
 
 func (self *ClusterConfiguration) createDefaultShardSpace(database string) (*ShardSpace, error) {
@@ -1305,6 +1297,17 @@ func (self *ClusterConfiguration) AddShardSpace(space *ShardSpace) error {
 	copy(newSpaces[1:], databaseSpaces)
 	newSpaces[0] = space
 	self.databaseShardSpaces[space.Database] = newSpaces
+	return nil
+}
+
+func (self *ClusterConfiguration) UpdateShardSpace(space *ShardSpace) error {
+	self.shardLock.Lock()
+	defer self.shardLock.Unlock()
+	oldSpace := self.getShardSpaceByDatabaseAndName(space.Database, space.Name)
+	if oldSpace == nil {
+		return nil
+	}
+	oldSpace.UpdateFromSpace(space)
 	return nil
 }
 

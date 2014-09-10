@@ -227,6 +227,15 @@ func (self *SingleServerSuite) TestInvalidDataWrite(c *C) {
 	c.Assert(client.WriteSeries([]*influxdb.Series{series}), ErrorMatches, ".*\\(400\\).*invalid.*")
 }
 
+func (self *SingleServerSuite) BenchmarkListSeries(c *C) {
+	s := CreateSeries("reallylongtimeseriesprefix", 700000)
+	self.server.WriteData(s, c)
+	c.ResetTimer()
+	for i := 0; i < c.N; i++ {
+		self.server.RunQuery("list series", "m", c)
+	}
+}
+
 func (self *SingleServerSuite) TestLargeDeletes(c *C) {
 	numberOfPoints := 2 * 1024 * 1024
 	data := CreatePoints("test_large_deletes", 1, numberOfPoints)
@@ -946,4 +955,97 @@ func (self *SingleServerSuite) TestSeriesShouldReturnSorted(c *C) {
 	for i, s := range series {
 		c.Assert(s.Name, Equals, fmt.Sprintf("sort_%.3d", i+1))
 	}
+}
+
+func (self *SingleServerSuite) TestUpdateShardSpace(c *C) {
+	client := self.server.GetClient("", c)
+	db := "test_update_shard_space"
+	c.Assert(client.CreateDatabase(db), IsNil)
+	client = self.server.GetClient(db, c)
+
+	space1 := &influxdb.ShardSpace{Name: "space1", RetentionPolicy: "30d", Regex: "/.*/"}
+	err := client.CreateShardSpace(db, space1)
+	c.Assert(err, IsNil)
+	space2 := &influxdb.ShardSpace{Name: "space2", RetentionPolicy: "1d", Regex: "/^space2.*/"}
+	err = client.CreateShardSpace(db, space2)
+	c.Assert(err, IsNil)
+
+	self.server.WriteDataToDatabase(db, `
+[
+  {
+    "name": "foo",
+    "columns": ["val"],
+    "points":[[1]]
+  },
+  {
+  	"name": "space2.foo",
+  	"columns": ["val"],
+  	"points":[[2]]
+  }
+]`, c)
+
+	spaces, err := client.GetShardSpaces()
+	c.Assert(err, IsNil)
+	c.Assert(self.getSpace(db, "space2", "/^space2.*/", spaces), NotNil)
+	c.Assert(self.getSpace(db, "space1", "/.*/", spaces), NotNil)
+
+	series, err := client.Query("select count(val) from /.*/")
+	c.Assert(err, IsNil)
+	c.Assert(series, HasLen, 2)
+	c.Assert(series[0].Name, Equals, "foo")
+	c.Assert(series[0].Points[0][1], Equals, float64(1))
+	c.Assert(series[1].Name, Equals, "space2.foo")
+	c.Assert(series[1].Points[0][1], Equals, float64(1))
+
+	space2.Regex = "/^(space2|foo).*/"
+	err = client.UpdateShardSpace(db, "space2", space2)
+	c.Assert(err, IsNil)
+
+	spaces, err = client.GetShardSpaces()
+	c.Assert(err, IsNil)
+	c.Assert(self.getSpace(db, "space2", "/^(space2|foo).*/", spaces), NotNil)
+	c.Assert(self.getSpace(db, "space1", "/.*/", spaces), NotNil)
+
+	// foo should now be effectively hidden from us.
+	series, err = client.Query("select count(val) from /.*/")
+	c.Assert(err, IsNil)
+	c.Assert(series, HasLen, 1)
+	c.Assert(series[0].Name, Equals, "space2.foo")
+	c.Assert(series[0].Points[0][1], Equals, float64(1))
+
+	self.server.WriteDataToDatabase(db, `
+[
+  {
+    "name": "foo",
+    "columns": ["val"],
+    "points":[[5]]
+  }
+]`, c)
+
+	series, err = client.Query("select * from foo")
+	c.Assert(err, IsNil)
+	c.Assert(series, HasLen, 1)
+	c.Assert(series[0].Name, Equals, "foo")
+	c.Assert(series[0].Points[0][2], Equals, float64(5))
+}
+
+// for issue #853 https://github.com/influxdb/influxdb/issues/853
+func (self *SingleServerSuite) TestApiReturnsClusterConfigOnlyIfAdmin(c *C) {
+	resp, err := http.Get("http://localhost:8086/cluster/configuration?u=root&p=root")
+	c.Assert(err, IsNil)
+	decoder := json.NewDecoder(resp.Body)
+	m := make(map[string]interface{})
+	err = decoder.Decode(&m)
+	c.Assert(err, IsNil)
+	c.Assert(m["Admins"], NotNil)
+	c.Assert(m["DbUsers"], NotNil)
+	c.Assert(m["Databases"], NotNil)
+	c.Assert(m["Servers"], NotNil)
+	c.Assert(m["ContinuousQueries"], NotNil)
+	c.Assert(m["MetaStore"], NotNil)
+	c.Assert(m["Shards"], NotNil)
+	c.Assert(m["DatabaseShardSpaces"], NotNil)
+
+	resp, _ = http.Get("http://localhost:8086/cluster/configuration")
+	c.Assert(resp.StatusCode, Equals, http.StatusUnauthorized)
 }
